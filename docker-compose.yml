@@ -12,7 +12,7 @@ services:
     environment:
       POSTGRES_DB: kestra
       POSTGRES_USER: kestra
-      POSTGRES_PASSWORD: k3str4
+      POSTGRES_PASSWORD: ${KESTRA_DB_PASSWORD:?set KESTRA_DB_PASSWORD in .env}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
       interval: 30s
@@ -23,11 +23,18 @@ services:
     image: kestra/kestra:latest
     pull_policy: always
     stop_grace_period: 6m
+    # `user: "root"` est requis par l'image Kestra elle-même (sinon
+    # AccessDeniedException sur /app/storage/plugins — vérifié). Le risque
+    # réellement critique, c'est root + /var/run/docker.sock ensemble
+    # (équivaut à root sur l'hôte) : ce socle ne monte PAS le socket Docker
+    # tant qu'aucun flow n'a besoin du Docker Task Runner. Si un jour un flow
+    # en a besoin, passer par un socket-proxy (ex.
+    # tecnativa/docker-socket-proxy) qui n'expose que les endpoints
+    # nécessaires — jamais le socket brut à ce conteneur root.
     user: "root"
     command: server standalone
     volumes:
       - kestra-data:/app/storage
-      - /var/run/docker.sock:/var/run/docker.sock
       - /tmp/kestra-wd:/tmp/kestra-wd
       - ./flows:/app/flows
     environment:
@@ -37,7 +44,7 @@ services:
             url: jdbc:postgresql://postgres:5432/kestra
             driverClassName: org.postgresql.Driver
             username: kestra
-            password: k3str4
+            password: ${KESTRA_DB_PASSWORD:?set KESTRA_DB_PASSWORD in .env}
         kestra:
           repository:
             type: postgres
@@ -52,7 +59,10 @@ services:
               path: /tmp/kestra-wd/tmp
           url: http://localhost:8080/
     ports:
-      - "8080:8080"
+      # Loopback uniquement — jamais exposé sur le réseau tant qu'aucune
+      # authentification forte (SSO/basic-auth) n'est configurée en plus
+      # de la création de compte admin au premier lancement.
+      - "127.0.0.1:8080:8080"
     depends_on:
       postgres:
         condition: service_started

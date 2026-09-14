@@ -1,5 +1,8 @@
 # Kestra local runtime
 .kestra/
 
+# env (contient KESTRA_DB_PASSWORD)
+.env
+
 # tool-specific (not shared across the team)
 CLAUDE.md
