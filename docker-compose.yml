@@ -23,14 +23,6 @@ services:
     image: kestra/kestra:latest
     pull_policy: always
     stop_grace_period: 6m
-    # `user: "root"` est requis par l'image Kestra elle-même (sinon
-    # AccessDeniedException sur /app/storage/plugins — vérifié). Le risque
-    # réellement critique, c'est root + /var/run/docker.sock ensemble
-    # (équivaut à root sur l'hôte) : ce socle ne monte PAS le socket Docker
-    # tant qu'aucun flow n'a besoin du Docker Task Runner. Si un jour un flow
-    # en a besoin, passer par un socket-proxy (ex.
-    # tecnativa/docker-socket-proxy) qui n'expose que les endpoints
-    # nécessaires — jamais le socket brut à ce conteneur root.
     user: "root"
     command: server standalone
     volumes:
