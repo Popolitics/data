@@ -1,0 +1,5 @@
+# Kestra local runtime
+.kestra/
+
+# tool-specific (not shared across the team)
+CLAUDE.md
