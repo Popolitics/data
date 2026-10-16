@@ -1,4 +1,4 @@
-name: Build and Push to GHCR (main)
+name: Build and Push to GHCR
 
 on:
   push:
@@ -12,6 +12,10 @@ on:
       - '.dockerignore'
       - '.github/workflows/deploy.yml'
   pull_request:
+
+concurrency:
+  group: deploy-kestra-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -43,7 +47,7 @@ jobs:
         shell: bash
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
-      - name: Build de l'image et publication sur GHCR
+      - name: Build et publication de l'image
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
         with:
           context: .
@@ -58,17 +62,26 @@ jobs:
           repository: Popolitics/infra
           token: ${{ secrets.INFRA_REPO_TOKEN }}
           path: infra
-          ref: main
+          ref: feat/AUTH-1-init-argocd-integration-and-auth-service
 
-      - name: Mise à jour du tag Kustomize
+      - name: Mise à jour sécurisée du tag Kustomize
         if: github.event_name == 'push'
         shell: bash
         run: |
           cd infra/k8s/base/kestra
-          sed -i 's|newTag:.*|newTag: "${{ github.sha }}"|' kustomization.yaml
           
+          # 1. Ciblage strict de l'image kestra via yq
+          IMAGE_NAME="${{ steps.image.outputs.name }}"
+          yq eval "(.images[] | select(.name == \"$IMAGE_NAME\")).newTag = \"${{ github.sha }}\"" -i kustomization.yaml
+
+          # 2. Commit idempotent
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add kustomization.yaml
-          git commit -m "chore(kestra): update image tag to ${{ github.sha }}"
-          git push
+          
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(kestra): update image tag to ${{ github.sha }}"
+            git push
+          else
+            echo "Aucun changement de tag détecté, étape ignorée."
+          fi
