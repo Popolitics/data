@@ -1,9 +1,9 @@
-name: Build and Push to GHCR (Dev)
+name: Build and Push to GHCR (main)
 
 on:
   push:
     branches:
-      - dev # Déclenchement sur les pushs vers dev
+      - main
     paths:
       - 'src/**'
       - 'job/**'
