@@ -6,3 +6,9 @@
 
 # tool-specific (not shared across the team)
 CLAUDE.md
+
+@"
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+"@ | Add-Content .gitignore
