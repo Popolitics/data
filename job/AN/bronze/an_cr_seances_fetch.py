@@ -19,6 +19,8 @@ from pathlib import Path, PurePosixPath
 
 import requests
 
+CONFIG_FILE = "config.py"
+
 cwd = Path.cwd().resolve()
 locations = [cwd]
 try:
@@ -29,21 +31,21 @@ except NameError:
 PROJECT_ROOT = None
 for location in locations:
     candidates = [location, *location.parents]
-    PROJECT_ROOT = next((path for path in candidates if (path / 'lib' / 'config.py').is_file()), None)
+    PROJECT_ROOT = next((path for path in candidates if (path / 'lib' / CONFIG_FILE).is_file()), None)
     if PROJECT_ROOT is None:
-        PROJECT_ROOT = next((path / 'data' for path in candidates if (path / 'data' / 'lib' / 'config.py').is_file()), None)
+        PROJECT_ROOT = next((path / 'data' for path in candidates if (path / 'data' / 'lib' / CONFIG_FILE).is_file()), None)
     if PROJECT_ROOT is None:
         for child in location.iterdir():
-            if (child / 'lib' / 'config.py').is_file():
+            if (child / 'lib' / CONFIG_FILE).is_file():
                 PROJECT_ROOT = child
                 break
-            if (child / 'data' / 'lib' / 'config.py').is_file():
+            if (child / 'data' / 'lib' / CONFIG_FILE).is_file():
                 PROJECT_ROOT = child / 'data'
                 break
     if PROJECT_ROOT is not None:
         break
 if PROJECT_ROOT is None:
-    raise FileNotFoundError('Impossible de trouver la racine du dépôt data (lib/config.py).')
+    raise FileNotFoundError(f'Impossible de trouver la racine du dépôt data (lib/{CONFIG_FILE}).')
 
 sys.path.insert(0, str(PROJECT_ROOT))
 from lib.config import AN_BRONZE

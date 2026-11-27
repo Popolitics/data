@@ -41,23 +41,6 @@ output_file.parent.mkdir(parents=True, exist_ok=True)
 df.to_parquet(output_file, index=False)
 
 # %%
-"""
-import sys
-import importlib
-
-# Supprimer un éventuel module lib déjà chargé
-sys.modules.pop("lib", None)
-sys.modules.pop("lib.config", None)
-
-importlib.invalidate_caches()
-
-from lib.config import AN_BRONZE
-
-print(AN_BRONZE)
-
-"""
-
-# %%
 
 # %%
 

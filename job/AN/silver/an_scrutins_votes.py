@@ -25,13 +25,6 @@ from lib.config import AN_BRONZE
 from lib.config import AN_SILVER
 
 # %%
-"""
-input_file = AN_BRONZE / "scrutins.json.zip"
-
-print(f"Lecture du fichier : {input_file}")
-"""
-
-# %%
 url_votes = "https://data.assemblee-nationale.fr/static/openData/repository/17/loi/scrutins/Scrutins.json.zip"
 
 response = requests.get(url_votes)
