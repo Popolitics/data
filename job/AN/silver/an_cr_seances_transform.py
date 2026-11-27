@@ -56,8 +56,12 @@ import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 
+CONFIG_FILE = "config.py"
+
 NS = "{http://schemas.assemblee-nationale.fr/referentiel}"
 SCHEMA = "an_cr_seance/1"
+ADOPTE = "adopt\u00e9"
+REJETE = "rejet\u00e9"
 
 # Une interruption du président entre deux paragraphes d'un même orateur (« Veuillez conclure. »,
 # « Monsieur X, s'il vous plaît ! ») ne coupe pas le discours si elle est plus courte que ça (caractères).
@@ -96,6 +100,17 @@ def _clean(s: str) -> str:
     return "\n".join(line for line in lines if line)
 
 
+def _remove_marker_and_preceding_whitespace(text: str) -> str:
+    characters: list[str] = []
+    for char in text:
+        if char == "\x04":
+            while characters and characters[-1].isspace():
+                characters.pop()
+        else:
+            characters.append(char)
+    return "".join(characters)
+
+
 def split_reactions(raw: str) -> tuple[str, list[str]]:
     """Sépare le discours des réactions de l'hémicycle (italique entre parenthèses)."""
     # « (Applaudissements » + « sur » + « les bancs… » sont souvent des italiques séparés : on les recolle
@@ -112,7 +127,7 @@ def split_reactions(raw: str) -> tuple[str, list[str]]:
 
     text = re.sub(_ITAL_OPEN + r"(.*?)" + _ITAL_CLOSE, take, raw, flags=re.S)
     text = text.replace(_ITAL_OPEN, "").replace(_ITAL_CLOSE, "")
-    text = re.sub(r"\s*\x04", "", text)
+    text = _remove_marker_and_preceding_whitespace(text)
     return _clean(text), reactions
 
 
@@ -159,13 +174,13 @@ def parse_vote_presidence(text: str) -> dict | None:
     t = re.sub(r"\s+", " ", text)
     if m := _CENSURE.search(t):
         majorite, pour = int(m[1]), int(m[2])
-        return {"objet": "motion de censure", "numeros": [], "resultat": "adopté" if pour >= majorite else "rejeté",
+        return {"objet": "motion de censure", "numeros": [], "resultat": ADOPTE if pour >= majorite else REJETE,
                 "scrutin": {"votants": None, "exprimes": None, "majorite_absolue": majorite, "pour": pour,
                             "contre": None}}
     if m := _APPROBATION.search(t):
         votants, exprimes, majorite, pour, contre = map(int, m.groups())
         return {"objet": "declaration du gouvernement", "numeros": [],
-                "resultat": "adopté" if pour >= majorite else "rejeté",
+                "resultat": ADOPTE if pour >= majorite else REJETE,
                 "scrutin": {"votants": votants, "exprimes": exprimes, "majorite_absolue": majorite, "pour": pour,
                             "contre": contre}}
     return None
@@ -175,11 +190,11 @@ def parse_decision(text: str) -> dict | None:
     """« (L'amendement no 21 n'est pas adopté.) » -> {objet, numeros, resultat}."""
     t = _SPACES.sub(" ", text.split("\n")[0]).strip("() .")  # 1re ligne : la suite = réactions
     if re.search(r"(n.est|ne sont) pas adopté", t):
-        resultat = "rejeté"
+        resultat = REJETE
     elif re.search(r"(est|sont) retiré", t):
         resultat = "retiré"
     elif re.search(r"(est|sont) adopté", t):
-        resultat = "adopté"
+        resultat = ADOPTE
     elif re.search(r"tombe", t):
         resultat = "tombé"
     else:
@@ -226,14 +241,18 @@ def parse_election(text: str) -> dict | None:
 
 
 def parse_proclamation(text: str, candidats: list[dict]) -> tuple[list[str], str] | None:
-    """« M. X et Mme Y ayant obtenu…, je les proclame… » -> (élus, phrase). Élu = candidat dont le nom de famille
-    figure dans la phrase, à une coquille près (19/07/2024 : « Gabriel Amar » proclamé, candidat « Gabriel Amard »)."""
-    m = re.search(r"^.*je (?:le|la|les) proclame.*$", text, flags=re.M)
-    if not m:
+    """Find the line that proclaims elected candidates and return its text and names."""
+    proclamation = next(
+        (line for line in text.split("\n")
+         if re.search(r"je (?:le|la|les) proclame", line)),
+        None,
+    )
+    if proclamation is None:
         return None
-    mots = re.findall(r"[\w’'-]{3,}", m[0])
-    return [c["nom"] for c in candidats if c["nom"].split()[-1] in m[0]
-            or difflib.get_close_matches(c["nom"].split()[-1], mots, n=1, cutoff=0.85)], m[0]
+    mots = re.findall(r"[\w\u2019'-]{3,}", proclamation)
+    elus = [c["nom"] for c in candidats if c["nom"].split()[-1] in proclamation
+            or difflib.get_close_matches(c["nom"].split()[-1], mots, n=1, cutoff=0.85)]
+    return elus, proclamation
 
 
 # Heure de fin : « (La séance est levée à dix-neuf heures cinquante-cinq.) »
@@ -337,6 +356,45 @@ class _Parser:
             elif value == "" and titre:
                 self.ctx[key] = None
 
+    @staticmethod
+    def _speaker_group(nom: str) -> tuple[str, str | None]:
+        opening = nom.rfind("(")
+        if opening <= 0 or not nom.endswith(")"):
+            return nom, None
+        groupe = nom[opening + 1:-1]
+        if not 1 <= len(groupe) <= 12 or "(" in groupe or ")" in groupe:
+            return nom, None
+        left = nom[:opening]
+        nom = left.rstrip()
+        if not nom:
+            nom = left[:1]
+        return nom, groupe
+
+    @staticmethod
+    def _strip_president_title(nom: str) -> str:
+        comma = nom.rfind(",")
+        if comma < 0:
+            return nom
+        suffix = nom[comma + 1:].lstrip()
+        title = "vice-pr\u00e9sident"
+        if not suffix.startswith(title) or not re.fullmatch(r"\w*", suffix[len(title):]):
+            return nom
+        return nom[:comma].rstrip()
+
+    def _paragraph_text(self, raw: str, has_orateurs: bool) -> tuple[str, list[str]]:
+        if has_orateurs:
+            return split_reactions(raw)
+        return _clean(raw.replace(_ITAL_OPEN, "").replace(_ITAL_CLOSE, "")), []
+
+    def _paragraph_type(self, orateurs: list[dict], code: str, role_debat: str | None) -> str:
+        if not orateurs:
+            return "didascalie"
+        if code.startswith("INTERRUPTION"):
+            return "interruption"
+        if _role(orateurs[0]["nom"], orateurs[0]["qualite"], role_debat) == "president_seance":
+            return "presidence"
+        return "discours"
+
     def on_paragraph(self, el: ET.Element) -> None:
         texte_el = el.find(NS + "texte")
         raw = _raw(texte_el)
@@ -344,28 +402,18 @@ class _Parser:
             {"nom": _clean(o.findtext(NS + "nom", "")), "qualite": _clean(o.findtext(NS + "qualite", ""))}
             for o in el.iter(NS + "orateur")
         ]
-        if orateurs:
-            texte, reactions = split_reactions(raw)
-        else:  # texte du compte rendu, souvent tout en italique : « (L'amendement no 21 n'est pas adopté.) »
-            texte, reactions = _clean(raw.replace(_ITAL_OPEN, "").replace(_ITAL_CLOSE, "")), []
+        texte, reactions = self._paragraph_text(raw, bool(orateurs))
         if not texte and not reactions:
             return
         code = el.get("code_grammaire") or ""
-        if not orateurs:
-            typ = "didascalie"
-        elif code.startswith("INTERRUPTION"):
-            typ = "interruption"
-        elif _role(orateurs[0]["nom"], orateurs[0]["qualite"], el.get("roledebat")) == "president_seance":
-            typ = "presidence"
-        else:
-            typ = "discours"
+        typ = self._paragraph_type(orateurs, code, el.get("roledebat"))
         first = orateurs[0] if orateurs else {"nom": None, "qualite": ""}
         role = _role(first["nom"] or "", first["qualite"], el.get("roledebat")) if orateurs else None
         nom, groupe = first["nom"], None
-        if nom and (m := re.fullmatch(r"(.+?)\s*\(([^()]{1,12})\)", nom)):  # « Mme Mathilde Panot (LFI-NFP) »
-            nom, groupe = m.group(1), m.group(2)  # au nom de son groupe (explications de vote…)
+        if nom:
+            nom, groupe = self._speaker_group(nom)
         if role == "president_seance" and self.president:
-            nom = re.sub(r"\s*,\s*vice-président\w*$", "", self.president)
+            nom = self._strip_president_title(self.president)
         self.rows.append({
             "ordre": _num(el.get("ordre_absolu_seance")),
             "id_syceron": el.get("id_syceron"),
@@ -395,14 +443,31 @@ class _Parser:
     def _context(r: dict) -> tuple:
         return (r["sujet"], r["article"], r["amendement"], r["sous_amendement"])
 
+    @staticmethod
+    def _can_merge_speech(r: dict, open_speech: dict | None) -> bool:
+        return (
+            r["type"] == "discours"
+            and open_speech is not None
+            and r["id_acteur"] == open_speech["id_acteur"]
+            and _Parser._context(r) == _Parser._context(open_speech)
+        )
+
+    def _keeps_speech_open(self, r: dict, open_speech: dict | None) -> bool:
+        if r["type"] == "interruption" or (r["type"] == "didascalie" and not r["texte"]):
+            return True
+        return (
+            r["type"] == "presidence"
+            and open_speech is not None
+            and len(r["texte"]) < PRESIDENCE_COURTE
+                and not re.match(r"La parole est (\u00e0|maintenant \u00e0)", r["texte"])
+        )
+
     def merge(self) -> list[dict]:
         out: list[dict] = []
-        open_speech: dict | None = None  # dernier discours, prolongeable si son orateur reprend
+        open_speech: dict | None = None
 
         for r in self.rows:
-            if r["type"] == "discours" and open_speech is not None \
-                    and r["id_acteur"] == open_speech["id_acteur"] \
-                    and self._context(r) == self._context(open_speech):
+            if self._can_merge_speech(r, open_speech):
                 open_speech["texte"] += "\n" + r["texte"]
                 open_speech["reactions"] += r["reactions"]
                 open_speech["paragraphes"].append(r["id_syceron"])
@@ -416,14 +481,10 @@ class _Parser:
                 "paragraphes": [r["id_syceron"]],
                 **{k: v for k, v in r.items() if k not in ("ordre", "id_syceron")},
             }
-            if r["type"] == "interruption" or (r["type"] == "didascalie" and not r["texte"]):
+            if self._keeps_speech_open(r, open_speech):
                 if open_speech is not None:
                     rec["interrompt"] = open_speech["id"]
                     open_speech["interruptions"].append(rec["id"])
-            elif r["type"] == "presidence" and open_speech is not None and len(r["texte"]) < PRESIDENCE_COURTE \
-                    and not re.match(r"La parole est (à|maintenant à)", r["texte"]):
-                rec["interrompt"] = open_speech["id"]
-                open_speech["interruptions"].append(rec["id"])
             else:
                 open_speech = None
             if r["type"] == "discours":
@@ -432,8 +493,6 @@ class _Parser:
             out.append(rec)
 
         for rec in out:
-            # mots = suites séparées par des espaces contenant une lettre ou un chiffre : en français, « ! ? : ; »,
-            # les tirets et les guillemets sont entourés d'espaces et ne doivent pas compter
             rec["nb_mots"] = sum(1 for w in rec["texte"].split() if any(c.isalnum() for c in w))
             rec["nb_caracteres"] = len(rec["texte"])
         return out
@@ -564,39 +623,41 @@ def load_seance(path: str | Path) -> dict:
 # Sortie en tables : une ligne par enregistrement, colonnes plates (--format tables)
 # ---------------------------------------------------------------------------
 TABLES_SCHEMA = "an_cr_tables/1"
+PG_TEXT_PRIMARY_KEY = "text PRIMARY KEY"
+PG_TEXT_ARRAY = "text[]"
 _N_TYPE = {"discours": "nb_discours", "interruption": "nb_interruptions", "presidence": "nb_presidence",
            "didascalie": "nb_didascalies"}
 # table -> colonne -> type PostgreSQL ; sert à la fois aux lignes écrites et à schema.sql
 COLONNES: dict[str, dict[str, str]] = {
     "seances": {
-        "uid": "text PRIMARY KEY", "seance_ref": "text", "date": "date", "heure_debut": "text", "heure_fin": "text",
+        "uid": PG_TEXT_PRIMARY_KEY, "seance_ref": "text", "date": "date", "heure_debut": "text", "heure_fin": "text",
         "date_libelle": "text", "num_seance": "int", "num_seance_jour": "int", "legislature": "int",
-        "session": "text", "etat": "text", "version": "text", "fichier": "text", "presidences": "text[]",
-        "nb_paragraphes": "int", **{c: "int" for c in _N_TYPE.values()}, "orateurs_distincts": "int",
+        "session": "text", "etat": "text", "version": "text", "fichier": "text", "presidences": PG_TEXT_ARRAY,
+        "nb_paragraphes": "int", **dict.fromkeys(_N_TYPE.values(), "int"), "orateurs_distincts": "int",
         "nb_votes": "int", "nb_scrutins_publics": "int", "nb_elections": "int",
     },
     "interventions": {
-        "id": "text PRIMARY KEY", "seance_uid": "text", "ordre_debut": "int", "ordre_fin": "int",
-        "paragraphes": "text[]", "code_grammaire": "text", "type": "text", "orateur": "text",
-        "orateur_libelle": "text", "groupe": "text", "orateurs_associes": "text[]", "id_acteur": "text",
+        "id": PG_TEXT_PRIMARY_KEY, "seance_uid": "text", "ordre_debut": "int", "ordre_fin": "int",
+        "paragraphes": PG_TEXT_ARRAY, "code_grammaire": "text", "type": "text", "orateur": "text",
+        "orateur_libelle": "text", "groupe": "text", "orateurs_associes": PG_TEXT_ARRAY, "id_acteur": "text",
         "id_mandat": "text", "qualite": "text", "role": "text", "president_seance": "text", "point_odj": "int",
         "section": "text", "sous_section": "text", "sujet": "text", "article": "text", "amendement": "text",
-        "sous_amendement": "text", "stime": "double precision", "texte": "text", "reactions": "text[]",
+        "sous_amendement": "text", "stime": "double precision", "texte": "text", "reactions": PG_TEXT_ARRAY,
         "interrompt": "text", "nb_mots": "int", "nb_caracteres": "int",
     },
     "votes": {
-        "id": "text PRIMARY KEY", "seance_uid": "text", "ordre": "int", "objet": "text", "numeros": "text[]",
+        "id": PG_TEXT_PRIMARY_KEY, "seance_uid": "text", "ordre": "int", "objet": "text", "numeros": PG_TEXT_ARRAY,
         "resultat": "text", "scrutin_public": "boolean", "votants": "int", "exprimes": "int",
         "majorite_absolue": "int", "pour": "int", "contre": "int", "sujet": "text",
         "article_en_discussion": "text", "texte": "text",
     },
     "points": {
-        "id": "text PRIMARY KEY", "seance_uid": "text", "ordre": "int", "id_syceron": "text", "niveau": "int",
+        "id": PG_TEXT_PRIMARY_KEY, "seance_uid": "text", "ordre": "int", "id_syceron": "text", "niveau": "int",
         "titre": "text", "chemin": "text", "code_grammaire": "text",
     },
     "elections": {
-        "id": "text PRIMARY KEY", "seance_uid": "text", "ordre": "int", "objet": "text", "tour": "int",
-        "votants": "int", "exprimes": "int", "majorite_absolue": "int", "candidats": "jsonb", "elus": "text[]",
+        "id": PG_TEXT_PRIMARY_KEY, "seance_uid": "text", "ordre": "int", "objet": "text", "tour": "int",
+        "votants": "int", "exprimes": "int", "majorite_absolue": "int", "candidats": "jsonb", "elus": PG_TEXT_ARRAY,
         "proclamation": "text", "sujet": "text",
     },
 }
@@ -642,6 +703,39 @@ def schema_sql() -> str:
 # ## CLI d’origine
 
 # %%
+def _write_tables_for_seance(s: dict, f: Path, sorties: dict, vues: set) -> bool:
+    uid = s["seance"]["uid"]
+    if uid in vues:
+        print(f"\u23ed\ufe0f  {f.name} : s\u00e9ance {uid} d\u00e9j\u00e0 \u00e9crite, ignor\u00e9e")
+        return False
+    vues.add(uid)
+    for table, rows in tables(s).items():
+        sorties[table].writelines(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
+    return True
+
+
+def _process_file(f: Path, args: argparse.Namespace, sorties: dict, vues: set,
+                  ignores: list[str], erreurs: list[str]) -> bool:
+    try:
+        s = parse_seance(f)
+    except Exception as e:
+        erreurs.append(f.name)
+        print(f"\u274c {f.name} : {type(e).__name__}: {e}", file=sys.stderr)
+        return False
+    if est_provisoire(s):
+        ignores.append(f.name)
+        print(f"\u23ed\ufe0f  {f.name} : compte rendu provisoire, ignor\u00e9 (la version d\u00e9finitive le remplacera)")
+        return False
+    if args.format == "json":
+        (args.out / f"{f.stem}.json").write_text(json.dumps(s, ensure_ascii=False, indent=1), encoding="utf-8")
+    elif not _write_tables_for_seance(s, f, sorties, vues):
+        return False
+    st = s["statistiques"]
+    print(f"{f.name} : {st['paragraphes']} paragraphes -> {sum(st['interventions'].values())} interventions "
+          f"{st['interventions']}, {st['votes']} votes")
+    return True
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("sources", nargs="+", type=Path, help="fichiers XML ou dossiers qui en contiennent")
@@ -657,29 +751,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.format == "tables":  # fichiers réécrits à chaque lancement
         sorties = {t: (args.out / f"{t}.jsonl").open("w", encoding="utf-8") for t in COLONNES}
     for f in files:
-        try:  # un fichier illisible est signalé, sans arrêter les autres
-            s = parse_seance(f)
-        except Exception as e:
-            erreurs.append(f.name)
-            print(f"❌ {f.name} : {type(e).__name__}: {e}", file=sys.stderr)
-            continue
-        if est_provisoire(s):
-            ignores.append(f.name)
-            print(f"⏭️  {f.name} : compte rendu provisoire, ignoré (la version définitive le remplacera)")
-            continue
-        if args.format == "json":
-            (args.out / f"{f.stem}.json").write_text(json.dumps(s, ensure_ascii=False, indent=1), encoding="utf-8")
-        elif s["seance"]["uid"] in vues:  # même séance passée deux fois : des clés primaires en double
-            print(f"⏭️  {f.name} : séance {s['seance']['uid']} déjà écrite, ignorée")
-            continue
-        else:
-            vues.add(s["seance"]["uid"])
-            for t, rows in tables(s).items():
-                sorties[t].writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
-        ecrits += 1
-        st = s["statistiques"]
-        print(f"{f.name} : {st['paragraphes']} paragraphes -> {sum(st['interventions'].values())} interventions "
-              f"{st['interventions']}, {st['votes']} votes")
+        ecrits += _process_file(f, args, sorties, vues, ignores, erreurs)
     for out in sorties.values():
         out.close()
     print(f"✅ {ecrits} séances -> {args.out}/" + (f" ; {len(ignores)} provisoire(s) ignorée(s)" if ignores else "")
@@ -700,27 +772,47 @@ try:
 except NameError:
     pass
 
+
 PROJECT_ROOT = None
+
 for location in locations:
     candidates = [location, *location.parents]
-    PROJECT_ROOT = next((path for path in candidates if (path / 'lib' / 'config.py').is_file()), None)
+
+    PROJECT_ROOT = next(
+        (path for path in candidates
+         if (path / "lib" / CONFIG_FILE).is_file()),
+        None
+    )
+
     if PROJECT_ROOT is None:
-        PROJECT_ROOT = next((path / 'data' for path in candidates if (path / 'data' / 'lib' / 'config.py').is_file()), None)
+        PROJECT_ROOT = next(
+            (path / "data" for path in candidates
+             if (path / "data" / "lib" / CONFIG_FILE).is_file()),
+            None
+        )
+
     if PROJECT_ROOT is None:
         for child in location.iterdir():
-            if (child / 'lib' / 'config.py').is_file():
+            if (child / "lib" / CONFIG_FILE).is_file():
                 PROJECT_ROOT = child
                 break
-            if (child / 'data' / 'lib' / 'config.py').is_file():
-                PROJECT_ROOT = child / 'data'
+
+            if (child / "data" / "lib" / CONFIG_FILE).is_file():
+                PROJECT_ROOT = child / "data"
                 break
+
     if PROJECT_ROOT is not None:
         break
+
 if PROJECT_ROOT is None:
-    raise FileNotFoundError('Impossible de trouver la racine du dépôt data (lib/config.py).')
+    raise FileNotFoundError(
+        f"Impossible de trouver la racine du dépôt data (lib/{CONFIG_FILE})."
+    )
 
 sys.path.insert(0, str(PROJECT_ROOT))
+
 from lib.config import AN_BRONZE, AN_SILVER
+
 
 BRONZE_DIR = AN_BRONZE / 'cr_seances'
 XML_DIR = BRONZE_DIR / 'xml'
