@@ -12,3 +12,5 @@ __pycache__/
 *.py[cod]
 .ipynb_checkpoints/
 "@ | Add-Content .gitignore
+
+bronze_silver_RAG.py
